@@ -98,6 +98,10 @@ class LocalBrowserWatchdog(BaseWatchdog):
 		self._original_user_data_dir = str(profile.user_data_dir) if profile.user_data_dir else None
 		self._temp_dirs_to_cleanup = []
 
+		# Clean up any problematic browser profile files from previous sessions
+		if profile.user_data_dir:
+			self._cleanup_browser_profile(Path(profile.user_data_dir))
+
 		for attempt in range(max_retries):
 			try:
 				# Get launch args from profile
@@ -423,6 +427,53 @@ class LocalBrowserWatchdog(BaseWatchdog):
 				shutil.rmtree(temp_path, ignore_errors=True)
 		except Exception as e:
 			self.logger.debug(f'Failed to cleanup temp dir {temp_dir}: {e}')
+
+	def _cleanup_browser_profile(self, profile_path: Path) -> None:
+		"""Clean up problematic browser profile files that can prevent startup.
+
+		Removes Chrome IPC socket files, lock files, and other problematic files
+		that can be left behind from crashed or improperly terminated browser sessions.
+
+		Args:
+			profile_path: Path to browser profile directory
+		"""
+		if not profile_path.exists():
+			return
+
+		try:
+			# Chrome IPC socket files (like .com.google.Chrome.O4Rq2W)
+			chrome_ipc_pattern = '.com.google.Chrome.*'
+			for ipc_file in profile_path.glob(chrome_ipc_pattern):
+				try:
+					if ipc_file.is_file():
+						ipc_file.unlink()
+						self.logger.debug(f'[LocalBrowserWatchdog] Cleaned up Chrome IPC file: {ipc_file.name}')
+				except Exception as e:
+					self.logger.debug(f'[LocalBrowserWatchdog] Failed to remove IPC file {ipc_file}: {e}')
+
+			# Clean up problematic files in Default subdirectory
+			default_dir = profile_path / 'Default'
+			if default_dir.exists():
+				# Chrome IPC socket files in Default directory
+				for ipc_file in default_dir.glob(chrome_ipc_pattern):
+					try:
+						if ipc_file.is_file():
+							ipc_file.unlink()
+							self.logger.debug(f'[LocalBrowserWatchdog] Cleaned up Chrome IPC file: Default/{ipc_file.name}')
+					except Exception as e:
+						self.logger.debug(f'[LocalBrowserWatchdog] Failed to remove IPC file {ipc_file}: {e}')
+
+				# Clean up stale SingletonLock files if they exist
+				singleton_lock = default_dir / 'SingletonLock'
+				if singleton_lock.exists():
+					try:
+						singleton_lock.unlink()
+						self.logger.debug('[LocalBrowserWatchdog] Cleaned up stale SingletonLock file')
+					except Exception as e:
+						self.logger.debug(f'[LocalBrowserWatchdog] Failed to remove SingletonLock: {e}')
+
+		except Exception as e:
+			self.logger.debug(f'[LocalBrowserWatchdog] Error during profile cleanup: {e}')
 
 	@property
 	def browser_pid(self) -> int | None:
