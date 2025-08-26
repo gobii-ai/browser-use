@@ -165,8 +165,10 @@ class DOMWatchdog(BaseWatchdog):
 		if not not_a_meaningful_website:
 			self.logger.debug('🔍 DOMWatchdog.on_BrowserStateRequestEvent: ⏳ Waiting for page stability...')
 			try:
-				await self._wait_for_stable_network()
+				await asyncio.wait_for(self._wait_for_stable_network(), timeout=5.0)
 				self.logger.debug('🔍 DOMWatchdog.on_BrowserStateRequestEvent: ✅ Page stability complete')
+			except asyncio.TimeoutError:
+				self.logger.warning('🔍 DOMWatchdog.on_BrowserStateRequestEvent: Page stability wait timed out after 5s, continuing anyway...')
 			except Exception as e:
 				self.logger.warning(
 					f'🔍 DOMWatchdog.on_BrowserStateRequestEvent: Network waiting failed: {e}, continuing anyway...'
@@ -246,8 +248,11 @@ class DOMWatchdog(BaseWatchdog):
 				try:
 					# Call the DOM building method directly
 					self.logger.debug('🔍 DOMWatchdog.on_BrowserStateRequestEvent: Starting _build_dom_tree...')
-					content = await self._build_dom_tree(previous_state)
+					content = await asyncio.wait_for(self._build_dom_tree(previous_state), timeout=15.0)
 					self.logger.debug('🔍 DOMWatchdog.on_BrowserStateRequestEvent: ✅ _build_dom_tree completed')
+				except asyncio.TimeoutError:
+					self.logger.warning('🔍 DOMWatchdog.on_BrowserStateRequestEvent: DOM build timed out after 15s, using minimal state')
+					content = SerializedDOMState(_root=None, selector_map={})
 				except Exception as e:
 					self.logger.warning(f'🔍 DOMWatchdog.on_BrowserStateRequestEvent: DOM build failed: {e}, using minimal state')
 					content = SerializedDOMState(_root=None, selector_map={})
