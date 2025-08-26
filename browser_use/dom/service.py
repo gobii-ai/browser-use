@@ -265,21 +265,13 @@ class DomService:
 			)
 			ax_tree_requests.append(ax_tree_request)
 
-		# Wait for all requests to complete with timeout
-		try:
-			ax_trees = await asyncio.wait_for(asyncio.gather(*ax_tree_requests), timeout=8.0)
-		except asyncio.TimeoutError:
-			self.logger.warning(f'Accessibility tree requests timed out after 8s for target {target_id}, using empty tree')
-			return {'nodes': []}
-		except Exception as e:
-			self.logger.warning(f'Failed to get accessibility trees for target {target_id}: {e}, using empty tree')
-			return {'nodes': []}
+		# Wait for all requests to complete
+		ax_trees = await asyncio.gather(*ax_tree_requests)
 
 		# Merge all AX nodes into a single array
 		merged_nodes: list[AXNode] = []
 		for ax_tree in ax_trees:
-			if ax_tree and 'nodes' in ax_tree:
-				merged_nodes.extend(ax_tree['nodes'])
+			merged_nodes.extend(ax_tree['nodes'])
 
 		return {'nodes': merged_nodes}
 
@@ -334,84 +326,79 @@ class DomService:
 		except Exception as e:
 			self.logger.debug(f'Failed to get iframe scroll positions: {e}')
 
-		# Define CDP request factories with individual timeouts
+		# Define CDP request factories to avoid duplication
 		def create_snapshot_request():
-			return asyncio.wait_for(
-				cdp_session.cdp_client.send.DOMSnapshot.captureSnapshot(
-					params={
-						'computedStyles': REQUIRED_COMPUTED_STYLES,
-						'includePaintOrder': True,
-						'includeDOMRects': True,
-						'includeBlendedBackgroundColors': False,
-						'includeTextColorOpacities': False,
-					},
-					session_id=cdp_session.session_id,
-				),
-				timeout=8.0
+			return cdp_session.cdp_client.send.DOMSnapshot.captureSnapshot(
+				params={
+					'computedStyles': REQUIRED_COMPUTED_STYLES,
+					'includePaintOrder': True,
+					'includeDOMRects': True,
+					'includeBlendedBackgroundColors': False,
+					'includeTextColorOpacities': False,
+				},
+				session_id=cdp_session.session_id,
 			)
 
 		def create_dom_tree_request():
-			return asyncio.wait_for(
-				cdp_session.cdp_client.send.DOM.getDocument(
-					params={'depth': -1, 'pierce': True}, session_id=cdp_session.session_id
-				),
-				timeout=5.0
-			)
-
-		def create_device_pixel_ratio_request():
-			return asyncio.wait_for(
-				self._get_viewport_ratio(target_id),
-				timeout=3.0
+			return cdp_session.cdp_client.send.DOM.getDocument(
+				params={'depth': -1, 'pierce': True}, session_id=cdp_session.session_id
 			)
 
 		start = time.time()
 
-		# Create initial tasks with shorter overall timeout
+		# Create initial tasks
 		tasks = {
 			'snapshot': asyncio.create_task(create_snapshot_request()),
 			'dom_tree': asyncio.create_task(create_dom_tree_request()),
 			'ax_tree': asyncio.create_task(self._get_ax_tree_for_all_frames(target_id)),
-			'device_pixel_ratio': asyncio.create_task(create_device_pixel_ratio_request()),
+			'device_pixel_ratio': asyncio.create_task(self._get_viewport_ratio(target_id)),
 		}
 
-		# Wait for all tasks with shorter timeout
-		done, pending = await asyncio.wait(tasks.values(), timeout=12.0)
+		# Wait for all tasks with timeout
+		done, pending = await asyncio.wait(tasks.values(), timeout=10.0)
 
-		# Cancel any pending tasks
+		# Retry any failed or timed out tasks
 		if pending:
 			for task in pending:
 				task.cancel()
 
-		# Extract results, providing fallbacks for failed operations
+			# Retry mapping for pending tasks
+			retry_map = {
+				tasks['snapshot']: lambda: asyncio.create_task(create_snapshot_request()),
+				tasks['dom_tree']: lambda: asyncio.create_task(create_dom_tree_request()),
+				tasks['ax_tree']: lambda: asyncio.create_task(self._get_ax_tree_for_all_frames(target_id)),
+				tasks['device_pixel_ratio']: lambda: asyncio.create_task(self._get_viewport_ratio(target_id)),
+			}
+
+			# Create new tasks only for the ones that didn't complete
+			for key, task in tasks.items():
+				if task in pending and task in retry_map:
+					tasks[key] = retry_map[task]()
+
+			# Wait again with shorter timeout
+			done2, pending2 = await asyncio.wait([t for t in tasks.values() if not t.done()], timeout=2.0)
+
+			if pending2:
+				for task in pending2:
+					task.cancel()
+
+		# Extract results, tracking which ones failed
 		results = {}
 		failed = []
 		for key, task in tasks.items():
 			if task.done() and not task.cancelled():
 				try:
 					results[key] = task.result()
-				except asyncio.TimeoutError:
-					self.logger.warning(f'CDP request {key} timed out, using fallback')
-					failed.append(key)
 				except Exception as e:
-					self.logger.warning(f'CDP request {key} failed with exception: {e}, using fallback')
+					self.logger.warning(f'CDP request {key} failed with exception: {e}')
 					failed.append(key)
 			else:
-				self.logger.warning(f'CDP request {key} was cancelled or incomplete, using fallback')
+				self.logger.warning(f'CDP request {key} timed out')
 				failed.append(key)
 
-		# Provide fallbacks for failed operations
-		if 'snapshot' not in results:
-			self.logger.warning('DOM snapshot failed, using minimal fallback')
-			results['snapshot'] = {'documents': [], 'strings': []}
-		if 'dom_tree' not in results:
-			self.logger.warning('DOM tree failed, using minimal fallback') 
-			results['dom_tree'] = {'root': {'nodeId': 1, 'backendNodeId': 1, 'nodeType': 9, 'nodeName': '#document', 'nodeValue': '', 'children': []}}
-		if 'ax_tree' not in results:
-			self.logger.warning('Accessibility tree failed, using empty fallback')
-			results['ax_tree'] = {'nodes': []}
-		if 'device_pixel_ratio' not in results:
-			self.logger.warning('Device pixel ratio failed, using default fallback')
-			results['device_pixel_ratio'] = 1.0
+		# If any required tasks failed, raise an exception
+		if failed:
+			raise TimeoutError(f'CDP requests failed or timed out: {", ".join(failed)}')
 
 		snapshot = results['snapshot']
 		dom_tree = results['dom_tree']
