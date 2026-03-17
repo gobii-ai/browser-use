@@ -83,7 +83,7 @@ class TestTokenCostPricingUrl:
 		override_url = 'https://pricing.example/right.json'
 		cache_dir = tmp_path / 'browser_use' / 'token_cost'
 		cache_dir.mkdir(parents=True)
-		cache_file = cache_dir / 'pricing_legacy.json'
+		cache_file = cache_dir / 'pricing_wrong_source.json'
 		cache_file.write_text(
 			CachedPricingData(
 				timestamp=datetime.now(),
@@ -101,6 +101,7 @@ class TestTokenCostPricingUrl:
 
 		assert pricing is not None
 		assert pricing.model == 'right-model'
+		assert cache_file.exists()
 		client.get.assert_awaited_once_with(override_url, timeout=30)
 
 	@pytest.mark.asyncio

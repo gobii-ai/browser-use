@@ -96,9 +96,10 @@ class TokenCost:
 
 			# Check each file until we find a valid one
 			for cache_file in cache_files:
-				if await self._is_cache_valid(cache_file):
+				is_valid, should_delete = await self._get_cache_status(cache_file)
+				if is_valid:
 					return cache_file
-				else:
+				if should_delete:
 					# Clean up old cache files
 					try:
 						os.remove(cache_file)
@@ -109,22 +110,23 @@ class TokenCost:
 		except Exception:
 			return None
 
-	async def _is_cache_valid(self, cache_file: Path) -> bool:
-		"""Check if a specific cache file is valid and not expired"""
+	async def _get_cache_status(self, cache_file: Path) -> tuple[bool, bool]:
+		"""Return whether a cache file is usable and whether it should be deleted."""
 		try:
 			if not cache_file.exists():
-				return False
+				return False, False
 
 			# Read the cached data
 			cached = CachedPricingData.model_validate_json(await anyio.Path(cache_file).read_text())
 
 			# Check if cache is still valid
 			if datetime.now() - cached.timestamp >= self.CACHE_DURATION:
-				return False
+				return False, True
 
-			return self._cache_source_matches(cached)
+			# Keep caches from other sources so different pricing URLs don't delete each other.
+			return self._cache_source_matches(cached), False
 		except Exception:
-			return False
+			return False, True
 
 	def _cache_source_matches(self, cached: CachedPricingData) -> bool:
 		"""Only use cached pricing files from the same source URL."""
