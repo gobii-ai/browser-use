@@ -50,10 +50,11 @@ class TokenCost:
 
 	CACHE_DIR_NAME = 'browser_use/token_cost'
 	CACHE_DURATION = timedelta(days=1)
-	PRICING_URL = 'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json'
+	DEFAULT_PRICING_URL = 'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json'
 
-	def __init__(self, include_cost: bool = False):
+	def __init__(self, include_cost: bool = False, pricing_url: str | None = None):
 		self.include_cost = include_cost or os.getenv('BROWSER_USE_CALCULATE_COST', 'false').lower() == 'true'
+		self.pricing_url = pricing_url or CONFIG.BROWSER_USE_MODEL_PRICING_URL or self.DEFAULT_PRICING_URL
 
 		self.usage_history: list[TokenUsageEntry] = []
 		self.registered_llms: dict[str, BaseChatModel] = {}
@@ -118,9 +119,19 @@ class TokenCost:
 			cached = CachedPricingData.model_validate_json(await anyio.Path(cache_file).read_text())
 
 			# Check if cache is still valid
-			return datetime.now() - cached.timestamp < self.CACHE_DURATION
+			if datetime.now() - cached.timestamp >= self.CACHE_DURATION:
+				return False
+
+			return self._cache_source_matches(cached)
 		except Exception:
 			return False
+
+	def _cache_source_matches(self, cached: CachedPricingData) -> bool:
+		"""Only use cached pricing files from the same source URL."""
+		if cached.source_url is None:
+			return self.pricing_url == self.DEFAULT_PRICING_URL
+
+		return cached.source_url == self.pricing_url
 
 	async def _load_from_cache(self, cache_file: Path) -> None:
 		"""Load pricing data from a specific cache file"""
@@ -137,13 +148,13 @@ class TokenCost:
 		"""Fetch pricing data from LiteLLM GitHub and cache it with timestamp"""
 		try:
 			async with httpx.AsyncClient() as client:
-				response = await client.get(self.PRICING_URL, timeout=30)
+				response = await client.get(self.pricing_url, timeout=30)
 				response.raise_for_status()
 
 				self._pricing_data = response.json()
 
 			# Create cache object with timestamp
-			cached = CachedPricingData(timestamp=datetime.now(), data=self._pricing_data or {})
+			cached = CachedPricingData(timestamp=datetime.now(), source_url=self.pricing_url, data=self._pricing_data or {})
 
 			# Ensure cache directory exists
 			self._cache_dir.mkdir(parents=True, exist_ok=True)
